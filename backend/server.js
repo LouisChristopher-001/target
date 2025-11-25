@@ -262,6 +262,42 @@ function extractReturnInvoiceSet(filePath) {
   return returnSet;
 }
 
+// Upsert achievement: treat inputs as deltas and ADD them
+// We clear the whole month once before processing current sales+returns.
+async function upsertAchievement(
+  salespersonId,
+  year,
+  month,
+  ownDelta,
+  otherDelta
+) {
+  const existing = await MonthlyAchievement.findOne({
+    salesperson: salespersonId,
+    year,
+    month
+  });
+
+  const totalDelta = ownDelta + otherDelta;
+
+  if (existing) {
+    existing.ownAchievement += ownDelta;
+    existing.otherAchievement += otherDelta;
+    existing.totalAchievement += totalDelta;
+    await existing.save();
+  } else {
+    const doc = new MonthlyAchievement({
+      salesperson: salespersonId,
+      year,
+      month,
+      ownAchievement: ownDelta,
+      otherAchievement: otherDelta,
+      totalAchievement: totalDelta
+    });
+    await doc.save();
+  }
+}
+
+
 // ---------- CORE LOGIC: processRowsForSalesperson ----------
 
 /**
