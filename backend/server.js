@@ -10,16 +10,26 @@ const path = require("path");
 const DEBUG_SALES = true;
 
 const app = express();
+
+const allowedOrigins = [
+  "http://localhost:3000",
+  "https://target-fawn.vercel.app"   // your Vercel frontend
+];
+
 app.use(
   cors({
-    origin: ["https://target-fawn.vercel.app", "http://localhost:3000"],
+    origin: function (origin, callback) {
+      // allow mobile / Postman / curl with no origin
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      return callback(new Error("Not allowed by CORS"));
+    },
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"]
+    allowedHeaders: ["Content-Type"]
   })
 );
 
-// For safety, also handle preflight
-app.options("/*", cors());
+
 app.use(express.json());
 
 // ---------- MongoDB connection ----------
