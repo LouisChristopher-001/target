@@ -31,10 +31,12 @@ mongoose
 const salespersonSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, unique: true },
-    brand: { type: String, default: null }
+    brand: { type: String, default: null },
+    section: { type: String, default: null }   // 👈 NEW
   },
   { timestamps: true }
 );
+
 
 const monthlyTargetSchema = new mongoose.Schema(
   {
@@ -105,6 +107,15 @@ function isSparesItem(itemModel) {
   return String(itemModel).trim().toUpperCase().startsWith("SPARES");
 }
 
+// Normalise invoice number (for matching sales and return files)
+function normalizeInvoiceNo(v) {
+  if (!v) return "";
+  return String(v)
+    .trim()
+    .toUpperCase()
+    .replace(/\*+$/, ""); // remove trailing * characters
+}
+
 // Upsert salesperson without accidentally clearing brand
 async function upsertSalesperson(name, brand) {
   const normalizedName = name.trim().toUpperCase();
@@ -132,41 +143,105 @@ async function upsertSalesperson(name, brand) {
   return sp;
 }
 
-// Upsert achievement
-// Overwrite monthly achievement instead of adding
-async function upsertAchievement(
-  salespersonId,
-  year,
-  month,
-  ownValue,
-  otherValue
-) {
-  const existing = await MonthlyAchievement.findOne({
-    salesperson: salespersonId,
-    year,
-    month
-  });
-
-  const total = ownValue + otherValue;
+// Upsert achievement: treat inputs as deltas and ADD them
+// We clear the whole month once before processing current sales+returns.
+async function upsertSalesperson(name, brand, section) {
+  const normalizedName = name.trim().toUpperCase();
+  const existing = await Salesperson.findOne({ name: normalizedName });
 
   if (existing) {
-    existing.ownAchievement = ownValue;
-    existing.otherAchievement = otherValue;
-    existing.totalAchievement = total;
+    // Only update if values are actually passed in
+    if (typeof brand !== "undefined") {
+      existing.brand = brand ? brand.trim().toUpperCase() : null;
+    }
+    if (typeof section !== "undefined") {
+      existing.section = section ? section.trim().toUpperCase() : null;
+    }
     await existing.save();
-  } else {
-    const doc = new MonthlyAchievement({
-      salesperson: salespersonId,
-      year,
-      month,
-      ownAchievement: ownValue,
-      otherAchievement: otherValue,
-      totalAchievement: total
-    });
-    await doc.save();
+    return existing;
   }
+
+  const sp = new Salesperson({
+    name: normalizedName,
+    brand:
+      typeof brand === "undefined"
+        ? null
+        : brand
+        ? brand.trim().toUpperCase()
+        : null,
+    section:
+      typeof section === "undefined"
+        ? null
+        : section
+        ? section.trim().toUpperCase()
+        : null
+  });
+
+  await sp.save();
+  return sp;
 }
 
+
+// ---------- RETURN FILE PARSER (only "Ref. Doc. Info." column) ----------
+
+/**
+ * Return file format:
+ *  - Single important column named "Ref. Doc. Info." (may have spaces)
+ *  - Each cell value looks like "GI/16909*  02-11-2025" or similar
+ *  - We only need the bill number at the front
+ */
+function extractReturnInvoiceSet(filePath) {
+  const workbook = XLSX.readFile(filePath);
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+  const returnSet = new Set();
+
+  if (!rows.length) {
+    if (DEBUG_SALES) console.log("⚠️ Return file has no rows");
+    return returnSet;
+  }
+
+  const headerRow = rows[0];
+  let refColIndex = headerRow.findIndex((c) =>
+    String(c).trim().toUpperCase().startsWith("REF. DOC")
+  );
+
+  if (refColIndex === -1) {
+    // Fallback: just assume first column
+    refColIndex = 0;
+  }
+
+  if (DEBUG_SALES) {
+    console.log("📄 Return file using column index:", refColIndex);
+    console.log("   Header row:", headerRow);
+  }
+
+  for (let i = 1; i < rows.length; i++) {
+    const rowArr = rows[i];
+    const cell = rowArr[refColIndex];
+    const raw = String(cell || "").trim();
+    if (!raw) continue;
+
+    // Take first token as bill no (before first space)
+    const firstToken = raw.split(/\s+/)[0];
+    const norm = normalizeInvoiceNo(firstToken);
+    if (norm) {
+      returnSet.add(norm);
+    }
+  }
+
+  if (DEBUG_SALES) {
+    console.log(
+      "✅ Extracted return invoice count:",
+      returnSet.size,
+      "| sample:",
+      Array.from(returnSet).slice(0, 10)
+    );
+  }
+
+  return returnSet;
+}
 
 // ---------- CORE LOGIC: processRowsForSalesperson ----------
 
@@ -180,8 +255,19 @@ async function upsertAchievement(
  *         - Else (non spare) => that row's Net Amount is OTHER.
  *     * If no brand => all non spare Net Amount is OTHER.
  * - Achievements are the sum of Net Amount of accepted lines (no proportional scaling).
+ *
+ * factor = 1 for normal sales (add), factor = -1 if we ever want to subtract.
+ * returnInvoiceSet: Set of NORMALISED invoice numbers that must be skipped
+ *   (sales return list).
  */
-async function processRowsForSalesperson(rows, salespersonName, year, month) {
+async function processRowsForSalesperson(
+  rows,
+  salespersonName,
+  year,
+  month,
+  factor = 1,
+  returnInvoiceSet = new Set()
+) {
   if (DEBUG_SALES) {
     console.log(
       "\n🔍 Processing salesperson block:",
@@ -191,28 +277,42 @@ async function processRowsForSalesperson(rows, salespersonName, year, month) {
       "year:",
       year,
       "month:",
-      month
+      month,
+      "factor:",
+      factor
     );
   }
 
   const invoices = new Map();
-  // ... keep rest of the code that builds `invoices` the same
-
+  let lastInvNo = null;
 
   for (const row of rows) {
-    const invNo =
+    let invNoRaw =
       row["Invoice No."] ||
       row["Invoice No"] ||
       row["INVOICE NO"] ||
       row["Invoice"] ||
       row["Inv No"];
 
-    if (!invNo) continue;
+    invNoRaw = invNoRaw ? String(invNoRaw).trim() : "";
 
-    let inv = invoices.get(invNo);
+    // If this row does not repeat invoice number, inherit from previous line
+    const normInvNo = invNoRaw ? normalizeInvoiceNo(invNoRaw) : lastInvNo;
+
+    if (!normInvNo) {
+      // No invoice number yet (and nothing to inherit) — skip
+      continue;
+    }
+
+    // Update last non empty invoice number
+    if (invNoRaw) {
+      lastInvNo = normInvNo;
+    }
+
+    let inv = invoices.get(normInvNo);
     if (!inv) {
       inv = {
-        invoiceNo: invNo,
+        invoiceNo: normInvNo,
         customer:
           row["Customer"] ||
           row["Financier/Customer"] ||
@@ -228,30 +328,48 @@ async function processRowsForSalesperson(rows, salespersonName, year, month) {
         cashDiscount: num(row["(-) CASH DISCOUNT"]),
         items: []
       };
-      invoices.set(invNo, inv);
+      invoices.set(normInvNo, inv);
     } else {
-      if (!inv.invoiceValue)
-        inv.invoiceValue =
-          num(row["Invoice Value"] || row["Inv Value"]) || inv.invoiceValue;
-      if (!inv.ccCharges)
-        inv.ccCharges =
-          num(row["(+) CREDIT CARD CHARGES"]) || inv.ccCharges;
-      if (!inv.negRoundOff)
-        inv.negRoundOff = num(row["(-) Round Off"]) || inv.negRoundOff;
-      if (!inv.posRoundOff)
-        inv.posRoundOff = num(row["(+) Round Off"]) || inv.posRoundOff;
-      if (!inv.cashDiscount)
-        inv.cashDiscount =
-          num(row["(-) CASH DISCOUNT"]) || inv.cashDiscount;
-      if (!inv.netInvoice)
-        inv.netInvoice =
-          num(row["Net Invoice"] || row["Net Inv"]) || inv.netInvoice;
-      if (!inv.amountRealised)
-        inv.amountRealised =
-          num(row["Amount Realised"] || row["Amt Realised"]) ||
-          inv.amountRealised;
+      // Fill in invoice level numbers only if still missing
+      const invValueCandidate = num(row["Invoice Value"] || row["Inv Value"]);
+      if (!inv.invoiceValue && invValueCandidate) {
+        inv.invoiceValue = invValueCandidate;
+      }
+
+      const ccCandidate = num(row["(+) CREDIT CARD CHARGES"]);
+      if (!inv.ccCharges && ccCandidate) {
+        inv.ccCharges = ccCandidate;
+      }
+
+      const negCandidate = num(row["(-) Round Off"]);
+      if (!inv.negRoundOff && negCandidate) {
+        inv.negRoundOff = negCandidate;
+      }
+
+      const posCandidate = num(row["(+) Round Off"]);
+      if (!inv.posRoundOff && posCandidate) {
+        inv.posRoundOff = posCandidate;
+      }
+
+      const cashCandidate = num(row["(-) CASH DISCOUNT"]);
+      if (!inv.cashDiscount && cashCandidate) {
+        inv.cashDiscount = cashCandidate;
+      }
+
+      const netInvCandidate = num(row["Net Invoice"] || row["Net Inv"]);
+      if (!inv.netInvoice && netInvCandidate) {
+        inv.netInvoice = netInvCandidate;
+      }
+
+      const amtRealCandidate = num(
+        row["Amount Realised"] || row["Amt Realised"]
+      );
+      if (!inv.amountRealised && amtRealCandidate) {
+        inv.amountRealised = amtRealCandidate;
+      }
     }
 
+    // Add this line item (every row belonging to that invoice)
     inv.items.push({
       model: row["Item/Model"] || row["Item"] || "",
       brand: row["Brand"] || "",
@@ -259,15 +377,16 @@ async function processRowsForSalesperson(rows, salespersonName, year, month) {
     });
   }
 
-   const salesperson = await Salesperson.findOne({
+  const salesperson = await Salesperson.findOne({
     name: salespersonName.trim().toUpperCase()
   });
 
   if (!salesperson) {
     console.error("❌ Salesperson not found in DB:", salespersonName);
-    throw new Error(
-      `Salesperson "${salespersonName}" not found. Please create mapping first via /api/salespersons`
-    );
+    if (DEBUG_SALES) {
+      console.log("   ⚠️ Skipping entire block for unknown salesperson");
+    }
+    return; // Do not throw, just ignore this block
   }
 
   const ownBrand = salesperson.brand
@@ -283,10 +402,21 @@ async function processRowsForSalesperson(rows, salespersonName, year, month) {
     );
   }
 
-    let totalOwn = 0;
+  let totalOwn = 0;
   let totalOther = 0;
 
-  for (const [, inv] of invoices) {
+  for (const [invKey, inv] of invoices) {
+    // Skip invoices present in return list
+    if (returnInvoiceSet.has(invKey)) {
+      if (DEBUG_SALES) {
+        console.log(
+          "   ⛔ Skipping invoice due to SALES RETURN list:",
+          invKey
+        );
+      }
+      continue;
+    }
+
     const customer = String(inv.customer || "").trim().toUpperCase();
 
     // Final invoice value formula
@@ -406,17 +536,32 @@ async function processRowsForSalesperson(rows, salespersonName, year, month) {
       "| OWN:",
       totalOwn,
       "| OTHER:",
-      totalOther
+      totalOther,
+      "| factor:",
+      factor
     );
   }
 
-  await upsertAchievement(salesperson._id, year, month, totalOwn, totalOther);
+  const finalOwn = factor * totalOwn;
+  const finalOther = factor * totalOther;
+
+  await upsertAchievement(
+    salesperson._id,
+    year,
+    month,
+    finalOwn,
+    finalOther
+  );
 }
 
+// ---------- Multi-salesperson Excel (SALES) ----------
 
-// ---------- Multi-salesperson Excel ----------
-
-async function processExcelFileMulti(filePath, year, month) {
+async function processExcelFileMulti(
+  filePath,
+  year,
+  month,
+  returnInvoiceSet = new Set()
+) {
   const workbook = XLSX.readFile(filePath);
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
 
@@ -429,6 +574,18 @@ async function processExcelFileMulti(filePath, year, month) {
 
   for (const rowArr of rows) {
     const firstCell = String(rowArr[0] || "").trim();
+    const secondCell = String(rowArr[1] || "").trim();
+
+    // Skip any row where the 2nd cell contains "total" (salesperson total line)
+    if (secondCell.toUpperCase().includes("TOTAL")) {
+      if (DEBUG_SALES) {
+        console.log(
+          "   🚫 Skipping row because 2nd cell contains 'TOTAL':",
+          rowArr
+        );
+      }
+      continue;
+    }
 
     // 1) Detect the global header row ONCE: the row whose first cell is "Date"
     if (!globalHeader && /^Date$/i.test(firstCell)) {
@@ -463,14 +620,19 @@ async function processExcelFileMulti(filePath, year, month) {
       continue;
     }
 
-    // 3) Skip totals / meta lines
+    // 3) Skip totals / meta lines, but DO NOT skip normal detail rows
+    const isRowEmpty = rowArr.every(
+      (cell) => String(cell || "").trim() === ""
+    );
+
     if (
-      !firstCell ||
+      isRowEmpty ||
       /^total$/i.test(firstCell) ||
       /^grand total$/i.test(firstCell) ||
       /^branch\s*:/i.test(firstCell) ||
       /^period\s*:/i.test(firstCell)
     ) {
+      // This is a summary / meta / blank row – skip it
       continue;
     }
 
@@ -500,7 +662,14 @@ async function processExcelFileMulti(filePath, year, month) {
   for (const name of salespersonNames) {
     const blockRows = rowsBySalesperson[name];
     if (blockRows.length === 0) continue;
-    await processRowsForSalesperson(blockRows, name, year, month);
+    await processRowsForSalesperson(
+      blockRows,
+      name,
+      year,
+      month,
+      1,
+      returnInvoiceSet
+    );
   }
 }
 
@@ -509,21 +678,23 @@ async function processExcelFileMulti(filePath, year, month) {
 // Single salesperson create/update
 app.post("/api/salespersons", async (req, res) => {
   try {
-    const { name, brand } = req.body;
+    const { name, brand, section } = req.body;
     if (!name) {
       return res.status(400).json({ error: "name is required" });
     }
-    const sp = await upsertSalesperson(name, brand);
+    const sp = await upsertSalesperson(name, brand, section); // 👈 pass section
     res.json({
       id: sp._id,
       name: sp.name,
-      brand: sp.brand
+      brand: sp.brand,
+      section: sp.section
     });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to upsert salesperson" });
   }
 });
+
 
 // Bulk brand update
 app.post("/api/salespersons/bulk", async (req, res) => {
@@ -536,26 +707,30 @@ app.post("/api/salespersons/bulk", async (req, res) => {
     }
 
     for (const item of salespersons) {
-      if (!item) continue;
-      const { id, name, brand } = item;
+  if (!item) continue;
+  const { id, name, brand, section } = item;
 
-      let sp = null;
-      if (id) {
-        sp = await Salesperson.findById(id);
-      } else if (name) {
-        sp = await Salesperson.findOne({
-          name: String(name).trim().toUpperCase()
-        });
-      }
+  let sp = null;
+  if (id) {
+    sp = await Salesperson.findById(id);
+  } else if (name) {
+    sp = await Salesperson.findOne({
+      name: String(name).trim().toUpperCase()
+    });
+  }
 
-      if (!sp) continue;
+  if (!sp) continue;
 
-      sp.brand = brand ? String(brand).trim().toUpperCase() : null;
-      await sp.save();
-    }
+  sp.brand = brand ? String(brand).trim().toUpperCase() : null;
+  sp.section = section ? String(section).trim().toUpperCase() : null;
 
-    const updated = await Salesperson.find().sort({ name: 1 });
-    res.json(updated);
+  // 👈 THIS WAS MISSING
+  await sp.save();
+}
+
+const updated = await Salesperson.find().sort({ name: 1 });
+res.json(updated);
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to bulk update salespersons" });
@@ -661,30 +836,52 @@ app.post("/api/targets/bulk", async (req, res) => {
   }
 });
 
-// Upload Excel (all salespersons)
+// Upload Excel (all salespersons) + optional sales return list
 app.post(
   "/api/upload-sales",
-  upload.single("file"),
+  upload.fields([
+    { name: "salesFile", maxCount: 1 },
+    { name: "returnsFile", maxCount: 1 }, // must match frontend
+    { name: "file", maxCount: 1 } // optional fallback
+  ]),
   async (req, res) => {
     const { year, month } = req.body;
 
     if (!year || !month) {
-      return res
-        .status(400)
-        .json({ error: "year and month are required" });
-    }
-    if (!req.file) {
-      return res.status(400).json({ error: "Excel file is required" });
+      return res.status(400).json({ error: "year and month are required" });
     }
 
-    const filePath = path.join(__dirname, req.file.path);
+    const yearNum = Number(year);
+    const monthNum = Number(month);
 
     try {
-      await processExcelFileMulti(filePath, Number(year), Number(month));
-      fs.unlinkSync(filePath);
+      // Clear old achievements for this period
+      await MonthlyAchievement.deleteMany({ year: yearNum, month: monthNum });
+
+      const salesUploaded =
+        req.files?.salesFile?.[0] || req.files?.file?.[0] || null;
+      const returnsUploaded = req.files?.returnsFile?.[0] || null;
+
+      if (!salesUploaded) {
+        return res.status(400).json({ error: "Sales Excel file is required" });
+      }
+
+      // Build return invoice set (if return file exists)
+      let returnInvoiceSet = new Set();
+      if (returnsUploaded) {
+        const returnPath = path.join(__dirname, returnsUploaded.path);
+        returnInvoiceSet = extractReturnInvoiceSet(returnPath);
+        fs.unlinkSync(returnPath);
+      }
+
+      // Process sales file, skipping invoices that appear in returnInvoiceSet
+      const salesPath = path.join(__dirname, salesUploaded.path);
+      await processExcelFileMulti(salesPath, yearNum, monthNum, returnInvoiceSet);
+      fs.unlinkSync(salesPath);
+
       res.json({
         ok: true,
-        message: "Sales for all salespersons processed and stored"
+        message: "Sales processed successfully (returns used to skip invoices)"
       });
     } catch (err) {
       console.error(err);
@@ -730,14 +927,16 @@ app.get("/api/dashboard", async (req, res) => {
         target > 0 ? (totalAchievement / target) * 100 : null;
 
       result.push({
-        name: sp.name,
-        brand: sp.brand,
-        target,
-        ownAchievement,
-        otherAchievement,
-        totalAchievement,
-        totalPercent
-      });
+  name: sp.name,
+  brand: sp.brand,
+  section: sp.section,   // 👈 add this
+  target,
+  ownAchievement,
+  otherAchievement,
+  totalAchievement,
+  totalPercent
+});
+
     }
 
     res.json(result);
