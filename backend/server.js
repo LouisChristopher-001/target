@@ -19,7 +19,7 @@ app.use(
 );
 
 // For safety, also handle preflight
-app.options("*", cors());
+app.options("/*", cors());
 app.use(express.json());
 
 // ---------- MongoDB connection ----------
