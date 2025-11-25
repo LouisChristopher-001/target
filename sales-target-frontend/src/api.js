@@ -1,7 +1,7 @@
 import axios from "axios";
 
 const api = axios.create({
-  baseURL: "http://localhost:4000" // your backend URL
+  baseURL: "https://target-qsx5.onrender.com" // your backend URL
 });
 
 export default api;
