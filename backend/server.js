@@ -10,7 +10,16 @@ const path = require("path");
 const DEBUG_SALES = true;
 
 const app = express();
-app.use(cors());
+app.use(
+  cors({
+    origin: ["https://target-fawn.vercel.app", "http://localhost:3000"],
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"]
+  })
+);
+
+// For safety, also handle preflight
+app.options("*", cors());
 app.use(express.json());
 
 // ---------- MongoDB connection ----------
