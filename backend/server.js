@@ -12,7 +12,7 @@ const DEBUG_SALES = true;
 const app = express();
 
 const allowedOrigins = [
-  "http://localhost:3000",
+  "http://localhost:3001",
   "https://target-fawn.vercel.app"   // your Vercel frontend
 ];
 

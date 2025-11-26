@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import api from "./api";
 import "./themeSwitch.css";
+import "./loader.css"; // 👈 NEW
 
 import {
   AppBar,
@@ -67,6 +68,102 @@ function getAppTheme(mode) {
   });
 }
 
+// ---------- LOADER ----------
+function Loader() {
+  return (
+    <div>
+      <svg
+        height="108px"
+        width="108px"
+        viewBox="0 0 128 128"
+        className="loader"
+      >
+        <defs>
+          <clipPath id="loader-eyes">
+            <circle
+              transform="rotate(-40,64,64) translate(0,-56)"
+              r="8"
+              cy="64"
+              cx="64"
+              className="loader__eye1"
+            ></circle>
+            <circle
+              transform="rotate(40,64,64) translate(0,-56)"
+              r="8"
+              cy="64"
+              cx="64"
+              className="loader__eye2"
+            ></circle>
+          </clipPath>
+          <linearGradient y2="1" x2="0" y1="0" x1="0" id="loader-grad">
+            <stop stopColor="#000" offset="0%"></stop>
+            <stop stopColor="#fff" offset="100%"></stop>
+          </linearGradient>
+          <mask id="loader-mask">
+            <rect
+              fill="url(#loader-grad)"
+              height="128"
+              width="128"
+              y="0"
+              x="0"
+            ></rect>
+          </mask>
+        </defs>
+        <g strokeDasharray="175.93 351.86" strokeWidth="12" strokeLinecap="round">
+          <g>
+            <rect
+              clipPath="url(#loader-eyes)"
+              height="64"
+              width="128"
+              fill="hsl(193,90%,50%)"
+            ></rect>
+            <g stroke="hsl(193,90%,50%)" fill="none">
+              <circle
+                transform="rotate(180,64,64)"
+                r="56"
+                cy="64"
+                cx="64"
+                className="loader__mouth1"
+              ></circle>
+              <circle
+                transform="rotate(0,64,64)"
+                r="56"
+                cy="64"
+                cx="64"
+                className="loader__mouth2"
+              ></circle>
+            </g>
+          </g>
+          <g mask="url(#loader-mask)">
+            <rect
+              clipPath="url(#loader-eyes)"
+              height="64"
+              width="128"
+              fill="hsl(223,90%,50%)"
+            ></rect>
+            <g stroke="hsl(223,90%,50%)" fill="none">
+              <circle
+                transform="rotate(180,64,64)"
+                r="56"
+                cy="64"
+                cx="64"
+                className="loader__mouth1"
+              ></circle>
+              <circle
+                transform="rotate(0,64,64)"
+                r="56"
+                cy="64"
+                cx="64"
+                className="loader__mouth2"
+              ></circle>
+            </g>
+          </g>
+        </g>
+      </svg>
+    </div>
+  );
+}
+
 function AppInner() {
   const [activeTab, setActiveTab] = useState("dashboard");
 
@@ -87,6 +184,7 @@ function AppInner() {
   const [salesFile, setSalesFile] = useState(null);
   const [returnsFile, setReturnsFile] = useState(null);
   const [uploadStatus, setUploadStatus] = useState("");
+  const [uploadLoading, setUploadLoading] = useState(false); // 👈 NEW
 
   // Dashboard
   const [dashboardData, setDashboardData] = useState([]);
@@ -291,6 +389,7 @@ function AppInner() {
     }
 
     try {
+      setUploadLoading(true); // 👈 NEW
       setUploadStatus("Uploading and processing...");
       const formData = new FormData();
 
@@ -333,6 +432,8 @@ function AppInner() {
         message: "Error processing file(s)",
         severity: "error"
       });
+    } finally {
+      setUploadLoading(false); // 👈 NEW
     }
   };
 
@@ -477,7 +578,10 @@ function AppInner() {
             <Tab label="Dashboard" value="dashboard" />
             <Tab label="Set Targets" value="targets" />
             <Tab label="Upload Sales / Returns" value="upload" />
-            <Tab label="Salespersons / Brand & Section" value="salespersons" />
+            <Tab
+              label="Salespersons / Brand & Section"
+              value="salespersons"
+            />
           </Tabs>
         </Paper>
 
@@ -712,9 +816,7 @@ function AppInner() {
                     type="file"
                     accept=".xls,.xlsx"
                     hidden
-                    onChange={(e) =>
-                      setSalesFile(e.target.files[0] || null)
-                    }
+                    onChange={(e) => setSalesFile(e.target.files[0] || null)}
                   />
                 </Button>
 
@@ -726,9 +828,7 @@ function AppInner() {
                     type="file"
                     accept=".xls,.xlsx"
                     hidden
-                    onChange={(e) =>
-                      setReturnsFile(e.target.files[0] || null)
-                    }
+                    onChange={(e) => setReturnsFile(e.target.files[0] || null)}
                   />
                 </Button>
 
@@ -898,6 +998,23 @@ function AppInner() {
           {snack.message}
         </Alert>
       </Snackbar>
+
+      {/* FULL-SCREEN LOADER OVERLAY */}
+      {(loadingDashboard || uploadLoading) && (
+        <Box
+          sx={{
+            position: "fixed",
+            inset: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            bgcolor: "rgba(0,0,0,0.4)",
+            zIndex: 3000
+          }}
+        >
+          <Loader />
+        </Box>
+      )}
     </>
   );
 }
