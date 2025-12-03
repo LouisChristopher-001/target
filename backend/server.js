@@ -110,9 +110,9 @@ const upload = multer({
 // ---------- Business helpers ----------
 
 const FINANCE_CUSTOMERS = new Set([
-  "BAJAJ FINANCE LTD",
-  "TVS FINANCE LTD",
-  "HDB FINANCE LTD"
+  "'BAJAJ FINANCE LTD",
+  "'HDB FINANCE LTD",
+  "'TVS FINANCE LTD"
 ]);
 
 function num(val) {
