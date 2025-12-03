@@ -110,9 +110,9 @@ const upload = multer({
 // ---------- Business helpers ----------
 
 const FINANCE_CUSTOMERS = new Set([
-  "'BAJAJ FINANCE LTD",
-  "'HDB FINANCE LTD",
-  "'TVS FINANCE LTD"
+  "BAJAJ FINANCE LTD",
+  "HDB FINANCE LTD",
+  "TVS FINANCE LTD"
 ]);
 
 function num(val) {
@@ -473,6 +473,7 @@ async function processRowsForSalesperson(
     }
 
     const customer = String(inv.customer || "").trim().toUpperCase();
+    
 
     // Final invoice value formula
     const finalInvoiceValue =
@@ -539,7 +540,9 @@ async function processRowsForSalesperson(
 
     const isMismatch =
       Math.round(inv.netInvoice || 0) !== Math.round(inv.amountRealised || 0);
-    const isFinanceCustomer = FINANCE_CUSTOMERS.has(customer);
+    const isFinanceCustomer = [...FINANCE_CUSTOMERS].some(fc =>
+  customer?.toUpperCase().includes(fc)
+);
 
     if (DEBUG_SALES) {
       console.log(
