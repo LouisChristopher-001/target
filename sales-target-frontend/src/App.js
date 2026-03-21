@@ -167,8 +167,10 @@ function Loader() {
 function AppInner() {
   const [activeTab, setActiveTab] = useState("dashboard");
 
-  const [year, setYear] = useState(2025);
-  const [month, setMonth] = useState(11);
+ const now = new Date();
+
+const [year, setYear] = useState(now.getFullYear());
+const [month, setMonth] = useState(now.getMonth() + 1);
 
   // Salesperson & brand / section mapping
   const [spName, setSpName] = useState("");
@@ -234,16 +236,20 @@ function AppInner() {
     }
   };
 
-  const fetchDashboard = async () => {
-    try {
-      setLoadingDashboard(true);
-      const res = await api.get("/api/dashboard", {
-        params: { year, month }
-      });
-      const data = res.data || [];
+const fetchDashboard = async () => {
+  try {
+    setLoadingDashboard(true);
+
+    const res = await api.get("/api/dashboard", {
+      params: { year, month }
+    });
+
+    const data = res.data || [];
+
+    // smoother UI update
+    setTimeout(() => {
       setDashboardData(data);
 
-      // Initialise targets editing table from dashboard data
       setTargetsTable(
         data.map((row) => ({
           name: row.name,
@@ -252,17 +258,19 @@ function AppInner() {
           target: row.target || 0
         }))
       );
-    } catch (err) {
-      console.error(err);
-      setSnack({
-        open: true,
-        message: "Error loading dashboard",
-        severity: "error"
-      });
-    } finally {
-      setLoadingDashboard(false);
-    }
-  };
+    }, 150);
+
+  } catch (err) {
+    console.error(err);
+    setSnack({
+      open: true,
+      message: "Error loading dashboard",
+      severity: "error"
+    });
+  } finally {
+    setTimeout(() => setLoadingDashboard(false), 250);
+  }
+};
 
   useEffect(() => {
     fetchDashboard();
@@ -375,67 +383,81 @@ function AppInner() {
     }
   };
 
-  const handleUploadSales = async (e) => {
-    e.preventDefault();
+const handleUploadSales = async (e) => {
+  e.preventDefault();
 
-    // At least one file should be provided: sales or returns
-    if (!salesFile && !returnsFile) {
-      setSnack({
-        open: true,
-        message: "Please select at least a Sales Excel file",
-        severity: "warning"
-      });
-      return;
-    }
+  if (!salesFile && !returnsFile) {
+    setSnack({
+      open: true,
+      message: "Please select at least a Sales Excel file",
+      severity: "warning"
+    });
+    return;
+  }
 
-    try {
-      setUploadLoading(true); // 👈 NEW
-      setUploadStatus("Uploading and processing...");
-      const formData = new FormData();
+  try {
+    setUploadLoading(true);
+    setUploadStatus("Preparing upload...");
 
-      // Backend expects salesFile and returnsFile
-      if (salesFile) {
-        formData.append("salesFile", salesFile);
-      }
-      if (returnsFile) {
-        formData.append("returnsFile", returnsFile);
-      }
+    const formData = new FormData();
 
-      // For backward compatibility (if server still checks 'file')
-      if (salesFile) {
-        formData.append("file", salesFile);
-      }
+    if (salesFile) formData.append("salesFile", salesFile);
+    if (returnsFile) formData.append("returnsFile", returnsFile);
 
-      formData.append("year", year);
-      formData.append("month", month);
+    formData.append("year", year);
+    formData.append("month", month);
 
-      await api.post("/api/upload-sales", formData, {
-        headers: {
-          "Content-Type": "multipart/form-data"
+    await api.post("/api/upload-sales", formData, {
+      headers: {
+        "Content-Type": "multipart/form-data"
+      },
+
+      onUploadProgress: (progressEvent) => {
+        const percent = Math.round(
+          (progressEvent.loaded * 100) / progressEvent.total
+        );
+
+        if (percent < 100) {
+          setUploadStatus(`Uploading file... ${percent}%`);
+        } else {
+          setUploadStatus("Processing Excel data...");
         }
-      });
+      }
+    });
 
-      setUploadStatus("Sales data processed successfully");
-      setSalesFile(null);
-      setReturnsFile(null);
-      await fetchDashboard();
-      setSnack({
-        open: true,
-        message: "Sales and sale return files processed",
-        severity: "success"
-      });
-    } catch (err) {
-      console.error(err);
-      setUploadStatus("Error processing file(s)");
-      setSnack({
-        open: true,
-        message: "Error processing file(s)",
-        severity: "error"
-      });
-    } finally {
-      setUploadLoading(false); // 👈 NEW
-    }
-  };
+    setUploadStatus("Finalising...");
+
+    setSalesFile(null);
+    setReturnsFile(null);
+
+    // ✅ IMPORTANT: do NOT block UI
+    setTimeout(() => {
+      fetchDashboard();
+    }, 1500);
+
+    setSnack({
+      open: true,
+      message: "Sales and sale return files processed",
+      severity: "success"
+    });
+
+  } catch (err) {
+    console.error(err);
+
+    setUploadStatus("Error processing file(s)");
+    setSnack({
+      open: true,
+      message: "Error processing file(s)",
+      severity: "error"
+    });
+
+  } finally {
+    setTimeout(() => {
+      setUploadLoading(false);
+      setUploadStatus("");
+    }, 1200);
+  }
+};
 
   const formatCurrency = (val) => {
     if (val == null) return "0";
@@ -842,6 +864,11 @@ function AppInner() {
                   {uploadStatus}
                 </Typography>
               )}
+
+              {uploadLoading && (
+  <LinearProgress sx={{ mt: 2 }} />
+)}
+
               <Typography
                 variant="body2"
                 color="text.secondary"
@@ -1000,7 +1027,7 @@ function AppInner() {
       </Snackbar>
 
       {/* FULL-SCREEN LOADER OVERLAY */}
-      {(loadingDashboard || uploadLoading) && (
+      {(uploadLoading) && (
         <Box
           sx={{
             position: "fixed",
@@ -1083,3 +1110,4 @@ function App() {
 }
 
 export default App;
+
